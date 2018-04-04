@@ -824,7 +824,7 @@ class CombinedDataLoader(object):
 class CombinedDataGenerator(object):
     """Generate training, validation or testing batches from loaded data
     """
-    def __init__(self, data, partition='train', fold=0, batch_size=32, shuffle=True):
+    def __init__(self, data, partition='train', fold=0, batch_size=32, shuffle=True, rank=0, total_ranks=2):
         self.data = data
         self.partition = partition
         self.batch_size = batch_size
@@ -834,10 +834,38 @@ class CombinedDataGenerator(object):
         elif partition == 'val':
             index = data.val_indexes[fold]
 
-        if shuffle:
-            index = np.random.permutation(index)
+        # Remove this. It's just for testing tsb
+        index = np.sort(index)
 
-        self.index = index
+#        if shuffle:
+#            index = np.random.permutation(index)
+
+
+        print ('shape of index: ', index.shape)
+        print ('first value: ', index[0])
+        print ('last value: ', index[-1])
+
+	
+        input_size = len(index)
+        per_rank_count =  int( input_size / total_ranks)
+        overloaded_ranks = input_size % total_ranks
+
+        if rank < overloaded_ranks: 
+            start = rank * (per_rank_count + 1) 
+            stop  = start + (per_rank_count)
+        else:
+            start = rank * per_rank_count + overloaded_ranks 
+            stop = start + per_rank_count - 1
+        
+        print ("size:{0}, rank:{1}, start:{2}, stop:{3}".format(total_ranks, rank, start, stop))
+
+        self.index = index[start: stop]
+
+        print ('shape of index: ', self.index.shape)
+        print ('first value: ', self.index[0])
+        print ('last value: ', self.index[-1])
+
+
         self.index_cycle = cycle(index)
         self.size = len(index)
         self.steps = np.ceil(self.size / batch_size)
