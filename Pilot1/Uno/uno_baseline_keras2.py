@@ -12,6 +12,7 @@ import threading
 import numpy as np
 import pandas as pd
 
+import horovod.tensorflow as hvd
 import keras
 from keras import backend as K
 from keras import optimizers
@@ -304,6 +305,17 @@ class Struct:
 
 
 def run(params):
+    
+    # Initialize hovorod
+    hvd.init()
+
+    # Pin GPU to be used to process local rank (one GPU per process)
+    config=tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    config.gpu_options.visible_device_list = str(hvd.local_rank())
+    K.set_session(tf.Session(config=config))
+
+
     args = Struct(**params)
     set_seed(args.rng_seed)
     ext = extension_from_parameters(args)
@@ -348,6 +360,7 @@ def run(params):
     cv_ext = ''
     cv = args.cv if args.cv > 1 else 1
 
+
     for fold in range(cv):
         if args.cv > 1:
             logger.info('Cross validation fold {}/{}:'.format(fold+1, cv))
@@ -355,10 +368,15 @@ def run(params):
 
         model = build_model(loader, args, silent=True)
 
-        optimizer = optimizers.deserialize({'class_name': args.optimizer, 'config': {}})
-        base_lr = args.base_lr or K.get_value(optimizer.lr)
-        if args.learning_rate:
-            K.set_value(optimizer.lr, args.learning_rate)
+        # default optimizer is adam
+        # optimizer = optimizers.deserialize({'class_name': args.optimizer, 'config': {}})
+        optimizer = keras.optimizers.Adadelta(lr=1.0 * hvd.size())
+        # Horovod: add Horovod Distributed Optimizer.
+        optimizer = hvd.DistributedOptimizer(optimizer)
+
+        # base_lr = args.base_lr or K.get_value(optimizer.lr)
+        # if args.learning_rate:
+        #     K.set_value(optimizer.lr, args.learning_rate)
 
         model.compile(loss=args.loss, optimizer=optimizer, metrics=[mae, r2])
 
@@ -368,6 +386,7 @@ def run(params):
         candle_monitor = CandleRemoteMonitor(params=params)
         timeout_monitor = TerminateOnTimeOut(params['timeout'])
 
+        # Set up call backs
         reduce_lr = ReduceLROnPlateau(monitor='val_loss', factor=0.5, patience=5, min_lr=0.00001)
         warmup_lr = LearningRateScheduler(warmup_scheduler)
         checkpointer = ModelCheckpoint(prefix+cv_ext+'.weights.h5', save_best_only=True, save_weights_only=True)
@@ -385,6 +404,24 @@ def run(params):
             callbacks.append(checkpointer)
         if args.tb:
             callbacks.append(tensorboard)
+
+
+        # This is necessary to ensure consistent initialization of all workers when
+        # training is started with random weights or restored from a checkpoint.
+        callbacks.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
+        # Horovod: average metrics among workers at the end of every epoch.
+        # Note: This callback must be in the list before the ReduceLROnPlateau,
+        # TensorBoard or other metrics-based callbacks.
+        callbacks.append(hvd.callbacks.MetricAverageCallback())
+        # Horovod: using `lr = 1.0 * hvd.size()` from the very beginning leads to worse final
+        # accuracy. Scale the learning rate `lr = 1.0` ---> `lr = 1.0 * hvd.size()` during
+        # the first five epochs. See https://arxiv.org/abs/1706.02677 for details.
+        # default is false
+        # callbacks.append(hvd.callbacks.LearningRateWarmupCallback(warmup_epochs=5, verbose=1))
+        # Reduce the learning rate if training plateaues.
+        # Default model reduce_lr is false
+        # callbacks.append(keras.callbacks.ReduceLROnPlateau(patience=10, verbose=1))
+
 
         train_gen = CombinedDataGenerator(loader, fold=fold, batch_size=args.batch_size, shuffle=args.shuffle)
         val_gen = CombinedDataGenerator(loader, partition='val', fold=fold, batch_size=args.batch_size, shuffle=args.shuffle)
