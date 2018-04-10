@@ -12,6 +12,7 @@ import threading
 import numpy as np
 import pandas as pd
 
+import tensorflow as tf
 import horovod.tensorflow as hvd
 import keras
 from keras import backend as K
@@ -49,7 +50,6 @@ def set_seed(seed):
     random.seed(seed)
 
     if K.backend() == 'tensorflow':
-        import tensorflow as tf
         tf.set_random_seed(seed)
         # session_conf = tf.ConfigProto(intra_op_parallelism_threads=1, inter_op_parallelism_threads=1)
         # sess = tf.Session(graph=tf.get_default_graph(), config=session_conf)
@@ -57,10 +57,10 @@ def set_seed(seed):
 
         # Uncommit when running on an optimized tensorflow where NUM_INTER_THREADS and
         # NUM_INTRA_THREADS env vars are set.
-        # session_conf = tf.ConfigProto(inter_op_parallelism_threads=int(os.environ['NUM_INTER_THREADS']),
-        #	intra_op_parallelism_threads=int(os.environ['NUM_INTRA_THREADS']))
-        # sess = tf.Session(graph=tf.get_default_graph(), config=session_conf)
-        # K.set_session(sess)
+        session_conf = tf.ConfigProto(inter_op_parallelism_threads=int(os.environ['NUM_INTER_THREADS']),
+            intra_op_parallelism_threads=int(os.environ['NUM_INTRA_THREADS']))
+        sess = tf.Session(graph=tf.get_default_graph(), config=session_conf)
+        K.set_session(sess)
 
 
 def verify_path(path):
@@ -423,7 +423,7 @@ def run(params):
         # callbacks.append(keras.callbacks.ReduceLROnPlateau(patience=10, verbose=1))
 
 
-        train_gen = CombinedDataGenerator(loader, fold=fold, batch_size=args.batch_size, shuffle=args.shuffle)
+        train_gen = CombinedDataGenerator(loader, fold=fold, batch_size=args.batch_size, shuffle=args.shuffle, rank=hvd.rank(), total_ranks=hvd.size())
         val_gen = CombinedDataGenerator(loader, partition='val', fold=fold, batch_size=args.batch_size, shuffle=args.shuffle)
 
         df_val = val_gen.get_response(copy=True)
