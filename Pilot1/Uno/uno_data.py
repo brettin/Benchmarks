@@ -824,7 +824,7 @@ class CombinedDataLoader(object):
 class CombinedDataGenerator(object):
     """Generate training, validation or testing batches from loaded data
     """
-    def __init__(self, data, partition='train', fold=0, batch_size=32, shuffle=True, rank=0, total_ranks=2):
+    def __init__(self, data, partition='train', fold=1, batch_size=32, shuffle=True, rank=0, total_ranks=1):
         self.data = data
         self.partition = partition
         self.batch_size = batch_size
@@ -841,9 +841,9 @@ class CombinedDataGenerator(object):
 #            index = np.random.permutation(index)
 
 
-        print ('shape of index: ', index.shape)
-        print ('first value: ', index[0])
-        print ('last value: ', index[-1])
+        print ('original shape of index: ', index.shape)
+        print ('original first value: ', index[0])
+        print ('original last value: ', index[-1])
 
 	
         input_size = len(index)
@@ -861,13 +861,13 @@ class CombinedDataGenerator(object):
 
         self.index = index[start: stop]
 
-        print ('shape of index: ', self.index.shape)
-        print ('first value: ', self.index[0])
-        print ('last value: ', self.index[-1])
+        print ('shape of index on rank ', rank, ': ', self.index.shape)
+        print ('first value on rank ', rank, ': ', self.index[0])
+        print ('last value on rank ', rank, ': ', self.index[-1])
 
 
-        self.index_cycle = cycle(index)
-        self.size = len(index)
+        self.index_cycle = cycle(self.index)
+        self.size = len(self.index)
         self.steps = np.ceil(self.size / batch_size)
 
     def reset(self):

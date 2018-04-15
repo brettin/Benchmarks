@@ -1,15 +1,14 @@
 #!/bin/bash
-#COBALT -n 64 
+#COBALT -n 128 
 #COBALT -q default
 #COBALT -A CSC249ADOA01 
-#COBALT -t 02:00:00
+#COBALT -t 06:00:00
 
 set -x
 
 CONDA_ENV=py3.6_tf1.4
 
 source activate $CONDA_ENV
-export LD_LIBRARY_PATH=/soft/datascience/conda/envs/py3.6_tf1.4/lib/:$LD_LIBRARY_PATH
 module load darshan
 
 export KMP_BLOCKTIME=0
@@ -25,6 +24,6 @@ cache=$COBALT_JOBID"_"$cache
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 echo $DIR
 
-aprun -N 1 -cc none -b python $DIR/uno_baseline_keras2.py --cache $cache"_cache" -v -l log.0 --use_landmark_genes
-
+# aprun -N 1 -cc none -b python $DIR/uno_baseline_keras2.py --cache $cache"_cache" -v -l log.0 --use_landmark_genes
+aprun -N 1 -n 128 -cc none -b python $DIR/uno_baseline_keras2_hvd.py --epochs 5 --cache 217024_thetamom3_cache -v -l log.$COBALT_JOBID --use_landmark_genes
 source deactivate
