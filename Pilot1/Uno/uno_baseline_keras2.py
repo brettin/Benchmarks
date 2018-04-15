@@ -12,7 +12,7 @@ import threading
 import numpy as np
 import pandas as pd
 
-import horovod.tensorflow as hvd
+# import horovod.tensorflow as hvd
 import keras
 from keras import backend as K
 from keras import optimizers
@@ -307,13 +307,13 @@ class Struct:
 def run(params):
     
     # Initialize hovorod
-    hvd.init()
+    # hvd.init()
 
     # Pin GPU to be used to process local rank (one GPU per process)
-    config=tf.ConfigProto()
-    config.gpu_options.allow_growth = True
-    config.gpu_options.visible_device_list = str(hvd.local_rank())
-    K.set_session(tf.Session(config=config))
+    # config=tf.ConfigProto()
+    # config.gpu_options.allow_growth = True
+    # config.gpu_options.visible_device_list = str(hvd.local_rank())
+    # K.set_session(tf.Session(config=config))
 
 
     args = Struct(**params)
@@ -369,14 +369,14 @@ def run(params):
         model = build_model(loader, args, silent=True)
 
         # default optimizer is adam
-        # optimizer = optimizers.deserialize({'class_name': args.optimizer, 'config': {}})
-        optimizer = keras.optimizers.Adadelta(lr=1.0 * hvd.size())
+        optimizer = optimizers.deserialize({'class_name': args.optimizer, 'config': {}})
+        # optimizer = keras.optimizers.Adadelta(lr=1.0 * hvd.size())
         # Horovod: add Horovod Distributed Optimizer.
-        optimizer = hvd.DistributedOptimizer(optimizer)
+        # optimizer = hvd.DistributedOptimizer(optimizer)
 
-        # base_lr = args.base_lr or K.get_value(optimizer.lr)
-        # if args.learning_rate:
-        #     K.set_value(optimizer.lr, args.learning_rate)
+        base_lr = args.base_lr or K.get_value(optimizer.lr)
+        if args.learning_rate:
+            K.set_value(optimizer.lr, args.learning_rate)
 
         model.compile(loss=args.loss, optimizer=optimizer, metrics=[mae, r2])
 
@@ -408,11 +408,11 @@ def run(params):
 
         # This is necessary to ensure consistent initialization of all workers when
         # training is started with random weights or restored from a checkpoint.
-        callbacks.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
+        #callbacks.append(hvd.callbacks.BroadcastGlobalVariablesCallback(0))
         # Horovod: average metrics among workers at the end of every epoch.
         # Note: This callback must be in the list before the ReduceLROnPlateau,
         # TensorBoard or other metrics-based callbacks.
-        callbacks.append(hvd.callbacks.MetricAverageCallback())
+        #callbacks.append(hvd.callbacks.MetricAverageCallback())
         # Horovod: using `lr = 1.0 * hvd.size()` from the very beginning leads to worse final
         # accuracy. Scale the learning rate `lr = 1.0` ---> `lr = 1.0 * hvd.size()` during
         # the first five epochs. See https://arxiv.org/abs/1706.02677 for details.
