@@ -1,8 +1,8 @@
 #!/bin/bash
-#COBALT -n 128 
+#COBALT -n 512 
 #COBALT -q default
 #COBALT -A CSC249ADOA01 
-#COBALT -t 06:00:00
+#COBALT -t 03:00:00
 
 set -x
 
@@ -25,5 +25,5 @@ DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 echo $DIR
 
 # aprun -N 1 -cc none -b python $DIR/uno_baseline_keras2.py --cache $cache"_cache" -v -l log.0 --use_landmark_genes
-aprun -N 1 -n 128 -cc none -b python $DIR/uno_baseline_keras2_hvd.py --epochs 5 --cache 217024_thetamom3_cache -v -l log.$COBALT_JOBID --use_landmark_genes
+aprun -N 1 -n 512 -cc none -b python $DIR/uno_baseline_keras2_hvd.py --epochs 5 --cache 217024_thetamom3_cache -v -l log.$COBALT_JOBID --use_landmark_genes
 source deactivate
