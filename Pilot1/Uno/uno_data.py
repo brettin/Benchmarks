@@ -91,6 +91,17 @@ def impute_and_scale(df, scaling='std', imputing='mean', dropna='all'):
     return df
 
 
+def discretize(df, col, bins=2, cutoffs=None):
+    y = df[col]
+    thresholds = cutoffs
+    if thresholds is None:
+        percentiles = [100 / bins * (i + 1) for i in range(bins - 1)]
+        thresholds = [np.percentile(y, x) for x in percentiles]
+    classes = np.digitize(y, thresholds)
+    df[col] = classes
+    return df
+
+
 def save_combined_dose_response():
     df1 = load_single_dose_response(combo_format=True, fraction=False)
     df2 = load_combo_dose_response(fraction=False)
@@ -117,7 +128,8 @@ def load_combined_dose_response(rename=True):
 
 
 def load_single_dose_response(combo_format=False, fraction=True):
-    path = get_file(DATA_URL + 'combined_single_drug_growth')
+    # path = get_file(DATA_URL + 'combined_single_drug_growth')
+    path = get_file(DATA_URL + 'rescaled_combined_single_drug_growth')
 
     df = global_cache.get(path)
     if df is None:
@@ -288,6 +300,12 @@ def lookup(df, query, ret, keys, match='match'):
     return list(set(df[mask][ret].values.flatten().tolist()))
 
 
+def load_cell_metadata():
+    path = get_file(DATA_URL + 'cl_metadata')
+    df = pd.read_table(path)
+    return df
+
+
 def cell_name_to_ids(name, source=None):
     path = get_file(DATA_URL + 'NCI60_CELLNAME_to_Combo.txt')
     df1 = pd.read_table(path)
@@ -412,7 +430,7 @@ def encode_sources(sources):
 
 
 def load_cell_rnaseq(ncols=None, scaling='std', imputing='mean', add_prefix=True,
-                     use_landmark_genes=False, use_filtered_genes=False,
+                     use_landmark_genes=False, use_filtered_genes=False, preprocess_rnaseq=None,
                      embed_feature_source=False, sample_set=None):
 
     if use_landmark_genes:
@@ -422,17 +440,25 @@ def load_cell_rnaseq(ncols=None, scaling='std', imputing='mean', add_prefix=True
     else:
         filename = 'combined_rnaseq_data'
 
+    if preprocess_rnaseq and preprocess_rnaseq != 'none':
+        scaling = None
+        filename += ('_' + preprocess_rnaseq)  # 'source_scale' or 'combat'
+
     path = get_file(DATA_URL + filename)
     df_cols = pd.read_table(path, engine='c', nrows=0)
-    total = df_cols.shape[1] - 1
+    total = df_cols.shape[1] - 1  # remove Sample column
+    if 'Cancer_type_id' in df_cols.columns:
+        total -= 1
     usecols = None
     if ncols and ncols < total:
         usecols = np.random.choice(total, size=ncols, replace=False)
-        usecols = np.append([0], np.add(sorted(usecols), 1))
+        usecols = np.append([0], np.add(sorted(usecols), 2))
         df_cols = df_cols.iloc[:, usecols]
 
     dtype_dict = dict((x, np.float32) for x in df_cols.columns[1:])
     df = pd.read_table(path, engine='c', usecols=usecols, dtype=dtype_dict)
+    if 'Cancer_type_id' in df.columns:
+        df.drop('Cancer_type_id', axis=1, inplace=True)
 
     prefixes = df['Sample'].str.extract('^([^.]*)', expand=False).rename('Source')
     sources = prefixes.drop_duplicates().reset_index(drop=True)
@@ -463,11 +489,16 @@ def load_cell_rnaseq(ncols=None, scaling='std', imputing='mean', add_prefix=True
     return df
 
 
-def select_drugs_with_response_range(df_response, lower=0, upper=0, span=0):
+def select_drugs_with_response_range(df_response, lower=0, upper=0, span=0, lower_median=None, upper_median=None):
     df = df_response.groupby(['Drug1', 'Sample'])['Growth'].agg(['min', 'max', 'median'])
     df['span'] = df['max'].clip(lower=-1, upper=1) - df['min'].clip(lower=-1, upper=1)
     df = df.groupby('Drug1').mean().reset_index().rename(columns={'Drug1': 'Drug'})
-    df_sub = df[(df['min'] <= lower) & (df['max'] >= upper) & (df['span'] >= span)]
+    mask = (df['min'] <= lower) & (df['max'] >= upper) & (df['span'] >= span)
+    if lower_median:
+        mask &= (df['median'] >= lower_median)
+    if upper_median:
+        mask &= (df['median'] <= upper_median)
+    df_sub = df[mask]
     return df_sub
 
 
@@ -535,7 +566,7 @@ class CombinedDataLoader(object):
             except json.JSONDecodeError as e:
                 logger.warning('Could not decode parameter file %s: %s', param_fname, e)
                 return False
-        ignore_keys = ['cache', 'partition_by']
+        ignore_keys = ['cache', 'partition_by', 'single']
         equal, diffs = dict_compare(params, cached_params, ignore_keys)
         if not equal:
             logger.warning('Cache parameter mismatch: %s\nSaved: %s\nAttemptd to load: %s', diffs, cached_params, params)
@@ -554,7 +585,7 @@ class CombinedDataLoader(object):
         return False
 
     def save_to_cache(self, cache, params):
-        for k in ['self', 'cache']:
+        for k in ['self', 'cache', 'single']:
             if k in params:
                 del params[k]
         param_fname = '{}.params.json'.format(cache)
@@ -565,12 +596,12 @@ class CombinedDataLoader(object):
             pickle.dump(self, f, pickle.HIGHEST_PROTOCOL)
         logger.info('Saved data to cache: %s', fname)
 
-
     def partition_data(self, partition_by=None, cv_folds=1, train_split=0.7, val_split=0.2,
-                       by_cell=None, by_drug=None):
+                       cell_types=None, by_cell=None, by_drug=None):
 
         seed = self.seed
         train_sep_sources = self.train_sep_sources
+        test_sep_sources = self.test_sep_sources
         df_response = self.df_response
 
         if not partition_by:
@@ -585,14 +616,29 @@ class CombinedDataLoader(object):
             df_response = df_response.assign(Group = assign_partition_groups(df_response, partition_by))
 
         mask = df_response['Source'].isin(train_sep_sources)
+        test_mask = df_response['Source'].isin(test_sep_sources)
+
         if by_drug:
             drug_ids = drug_name_to_ids(by_drug)
             logger.info('Mapped drug IDs for %s: %s', by_drug, drug_ids)
             mask &= (df_response['Drug1'].isin(drug_ids)) & (df_response['Drug2'].isnull())
+            test_mask &= (df_response['Drug1'].isin(drug_ids)) & (df_response['Drug2'].isnull())
+
         if by_cell:
             cell_ids = cell_name_to_ids(by_cell)
             logger.info('Mapped sample IDs for %s: %s', by_cell, cell_ids)
             mask &= (df_response['Sample'].isin(cell_ids))
+            test_mask &= (df_response['Sample'].isin(cell_ids))
+
+        if cell_types:
+            df_type = load_cell_metadata()
+            cell_ids = set()
+            for cell_type in cell_types:
+                cells = df_type[~df_type['TUMOR_TYPE'].isnull() & df_type['TUMOR_TYPE'].str.contains(cell_type, case=False)]
+                cell_ids |= set(cells['ANL_ID'].tolist())
+                logger.info('Mapped sample tissue types for %s: %s', cell_type, set(cells['TUMOR_TYPE'].tolist()))
+            mask &= (df_response['Sample'].isin(cell_ids))
+            test_mask &= (df_response['Sample'].isin(cell_ids))
 
         df_group = df_response[mask]['Group'].drop_duplicates().reset_index(drop=True)
 
@@ -605,25 +651,65 @@ class CombinedDataLoader(object):
 
         train_indexes = []
         val_indexes = []
+        test_indexes = []
 
         for index, (train_group_index, val_group_index) in enumerate(splits):
             train_groups = set(df_group.values[train_group_index])
             val_groups = set(df_group.values[val_group_index])
             train_index = df_response.index[df_response['Group'].isin(train_groups) & mask]
             val_index = df_response.index[df_response['Group'].isin(val_groups) & mask]
+            test_index = df_response.index[~df_response['Group'].isin(train_groups) & ~df_response['Group'].isin(val_groups) & test_mask]
+
             train_indexes.append(train_index)
             val_indexes.append(val_index)
+            test_indexes.append(test_index)
             if logger.isEnabledFor(logging.DEBUG):
-                logger.debug('CV fold %d: train data = %s, val data = %s', index, train_index.shape[0], val_index.shape[0])
+                logger.debug('CV fold %d: train data = %s, val data = %s, test data = %s', index, train_index.shape[0], val_index.shape[0], test_index.shape[0])
                 logger.debug('  train groups (%d): %s', df_response.loc[train_index]['Group'].nunique(), df_response.loc[train_index]['Group'].unique())
                 logger.debug('  val groups ({%d}): %s', df_response.loc[val_index]['Group'].nunique(), df_response.loc[val_index]['Group'].unique())
+                logger.debug('  test groups ({%d}): %s', df_response.loc[test_index]['Group'].nunique(), df_response.loc[test_index]['Group'].unique())
 
         self.partition_by = partition_by
         self.cv_folds = cv_folds
         self.train_indexes = train_indexes
         self.val_indexes = val_indexes
+        self.test_indexes = test_indexes
 
-    def log_features(self):
+    def build_feature_list(self, single=False):
+        input_features = collections.OrderedDict()
+        feature_shapes = {}
+
+        doses = ['dose1', 'dose2'] if not single else ['dose1']
+        for dose in doses:
+            input_features[dose] = 'dose'
+            feature_shapes['dose'] = (1,)
+
+        if self.encode_response_source:
+            input_features['response.source'] = 'response.source'
+            feature_shapes['response.source'] = (self.df_source.shape[1] - 1,)
+
+        for fea in self.cell_features:
+            feature_type = 'cell.' + fea
+            feature_name = 'cell.' + fea
+            df_cell = getattr(self, self.cell_df_dict[fea])
+            input_features[feature_name] = feature_type
+            feature_shapes[feature_type] = (df_cell.shape[1] - 1,)
+
+        drugs = ['drug1', 'drug2'] if not single else ['drug1']
+        for drug in drugs:
+            for fea in self.drug_features:
+                feature_type = 'drug.' + fea
+                feature_name = drug + '.' + fea
+                df_drug = getattr(self, self.drug_df_dict[fea])
+                input_features[feature_name] = feature_type
+                feature_shapes[feature_type] = (df_drug.shape[1] - 1,)
+
+        input_dim = sum([np.prod(feature_shapes[x]) for x in input_features.values()])
+
+        self.input_features = input_features
+        self.feature_shapes = feature_shapes
+        self.input_dim = input_dim
+
         logger.info('Input features shapes:')
         for k, v in self.input_features.items():
             logger.info('  {}: {}'.format(k, self.feature_shapes[v]))
@@ -632,12 +718,15 @@ class CombinedDataLoader(object):
     def load(self, cache=None, ncols=None, scaling='std', dropna=None,
              embed_feature_source=True, encode_response_source=True,
              cell_features=['rnaseq'], drug_features=['descriptors', 'fingerprints'],
+             drug_lower_response=1, drug_upper_response=-1, drug_response_span=0,
+             drug_median_response_min=-1, drug_median_response_max=1,
+             use_landmark_genes=False, use_filtered_genes=False,
+             preprocess_rnaseq=None, single=False,
              # train_sources=['GDSC', 'CTRP', 'ALMANAC', 'NCI60'],
              train_sources=['GDSC', 'CTRP', 'ALMANAC'],
              # val_sources='train',
              # test_sources=['CCLE', 'gCSI'],
              test_sources=['train'],
-             train_split=0.7, val_split=0.2,
              partition_by='drug_pair'):
 
         params = locals().copy()
@@ -650,7 +739,7 @@ class CombinedDataLoader(object):
             drug_features = []
 
         if cache and self.load_from_cache(cache, params):
-            self.log_features()
+            self.build_feature_list(single=single)
             return
 
         logger.info('Loading data from scratch ...')
@@ -667,7 +756,7 @@ class CombinedDataLoader(object):
         # test_sources=['CCLE', 'gCSI']
         # val_sources='train'
 
-        use_landmark_genes=True
+        # use_landmark_genes=True
 
         # drug_lower_response=-0.4
         # drug_upper_response=0.4
@@ -677,9 +766,9 @@ class CombinedDataLoader(object):
         # drug_upper_response=0
         # drug_response_span=1
 
-        drug_lower_response=1
-        drug_upper_response=-1
-        drug_response_span=0
+        # drug_lower_response=1
+        # drug_upper_response=-1
+        # drug_response_span=0
 
         df_response = load_combined_dose_response()
         if logger.isEnabledFor(logging.INFO):
@@ -705,15 +794,14 @@ class CombinedDataLoader(object):
         df_cells_with_response = df_response[['Sample']].drop_duplicates().reset_index(drop=True)
         logger.info('Combined raw dose response data has %d unique samples and %d unique drugs', df_cells_with_response.shape[0], df_drugs_with_response.shape[0])
 
-        logger.info('Limiting drugs to those with response mean low <= %g, mean high >= %g, and span >= %g ...', drug_lower_response, drug_upper_response, drug_response_span)
-        df_selected_drugs = select_drugs_with_response_range(df_response, span=drug_response_span, lower=drug_lower_response, upper=drug_upper_response)
+        logger.info('Limiting drugs to those with response min <= %g, max >= %g, span >= %g, median_min <= %g, median_max >= %g ...', drug_lower_response, drug_upper_response, drug_response_span, drug_median_response_min, drug_median_response_max)
+        df_selected_drugs = select_drugs_with_response_range(df_response, span=drug_response_span, lower=drug_lower_response, upper=drug_upper_response, lower_median=drug_median_response_min, upper_median=drug_median_response_max)
         logger.info('Selected %d drugs from %d', df_selected_drugs.shape[0], df_response['Drug1'].nunique())
-
 
         for fea in cell_features:
             fea = fea.lower()
             if fea == 'rnaseq' or fea == 'expression':
-                df_cell_rnaseq = load_cell_rnaseq(ncols=ncols, scaling=scaling, use_landmark_genes=use_landmark_genes, embed_feature_source=embed_feature_source)
+                df_cell_rnaseq = load_cell_rnaseq(ncols=ncols, scaling=scaling, use_landmark_genes=use_landmark_genes, use_filtered_genes=use_filtered_genes, preprocess_rnaseq=preprocess_rnaseq, embed_feature_source=embed_feature_source)
 
         for fea in drug_features:
             fea = fea.lower()
@@ -751,8 +839,7 @@ class CombinedDataLoader(object):
 
         df_response = df_response[df_response['Sample'].isin(df_cell_ids['Sample']) &
                                   df_response['Drug1'].isin(df_drug_ids['Drug']) &
-                                  (df_response['Drug2'].isin(df_drug_ids['Drug']) |
-                                   df_response['Drug2'].isnull())]
+                                  (df_response['Drug2'].isin(df_drug_ids['Drug']) | df_response['Drug2'].isnull())]
 
         df_response = df_response[df_response['Source'].isin(train_sep_sources + test_sep_sources)]
 
@@ -764,41 +851,10 @@ class CombinedDataLoader(object):
 
         df_response = df_response.assign(Group = assign_partition_groups(df_response, partition_by))
 
-        input_features = collections.OrderedDict()
-        feature_shapes = {}
-
-        if encode_response_source:
-            input_features['response.source'] = 'response.source'
-            feature_shapes['response.source'] = (df_source.shape[1] - 1,)
-
-        for fea in cell_features:
-            feature_type = 'cell.' + fea
-            feature_name = 'cell.' + fea
-            df_cell = locals()[cell_df_dict[fea]]
-            input_features[feature_name] = feature_type
-            feature_shapes[feature_type] = (df_cell.shape[1] - 1,)
-
-        for drug in ['drug1', 'drug2']:
-            for fea in drug_features:
-                feature_type = 'drug.' + fea
-                feature_name = drug + '.' + fea
-                df_drug = locals()[drug_df_dict[fea]]
-                input_features[feature_name] = feature_type
-                feature_shapes[feature_type] = (df_drug.shape[1] - 1,)
-
-        for dose in ['dose1', 'dose2']:
-            input_features[dose] = 'dose'
-            feature_shapes['dose'] = (1,)
-
-        input_dim = sum([np.prod(feature_shapes[x]) for x in input_features.values()])
-
         self.cell_features = cell_features
         self.drug_features = drug_features
         self.cell_df_dict = cell_df_dict
         self.drug_df_dict = drug_df_dict
-        self.input_features = input_features
-        self.feature_shapes = feature_shapes
-        self.input_dim = input_dim
         self.df_source = df_source
         self.df_response = df_response
         self.embed_feature_source = embed_feature_source
@@ -815,7 +871,7 @@ class CombinedDataLoader(object):
             if value is not None:
                 setattr(self, var, value)
 
-        self.log_features()
+        self.build_feature_list(single=single)
 
         if cache:
             self.save_to_cache(cache, params)
@@ -824,7 +880,7 @@ class CombinedDataLoader(object):
 class CombinedDataGenerator(object):
     """Generate training, validation or testing batches from loaded data
     """
-    def __init__(self, data, partition='train', fold=1, batch_size=32, shuffle=True, rank=0, total_ranks=1):
+    def __init__(self, data, partition='train', fold=0, source=None, batch_size=32, shuffle=True, rank=0, total_ranks=1):
         self.data = data
         self.partition = partition
         self.batch_size = batch_size
@@ -833,39 +889,33 @@ class CombinedDataGenerator(object):
             index = data.train_indexes[fold]
         elif partition == 'val':
             index = data.val_indexes[fold]
+        else:
+            index = data.test_indexes[fold]
 
-        # Remove this. It's just for testing tsb
-        index = np.sort(index)
+        if source:
+            df = data.df_response[['Source']].iloc[index, :]
+            index = df.index[df['Source'] == source]
 
-#        if shuffle:
-#            index = np.random.permutation(index)
-
+        if shuffle:
+            index = np.random.permutation(index)
+        # index = index[:len(index)//10]
 
         print ('original shape of index: ', index.shape)
-        print ('original first value: ', index[0])
-        print ('original last value: ', index[-1])
 
-	
         input_size = len(index)
         per_rank_count =  int( input_size / total_ranks)
         overloaded_ranks = input_size % total_ranks
 
-        if rank < overloaded_ranks: 
-            start = rank * (per_rank_count + 1) 
+        if rank < overloaded_ranks:
+            start = rank * (per_rank_count + 1)
             stop  = start + (per_rank_count)
         else:
-            start = rank * per_rank_count + overloaded_ranks 
+            start = rank * per_rank_count + overloaded_ranks
             stop = start + per_rank_count - 1
-        
+
         print ("size:{0}, rank:{1}, start:{2}, stop:{3}".format(total_ranks, rank, start, stop))
 
         self.index = index[start: stop]
-
-        print ('shape of index on rank ', rank, ': ', self.index.shape)
-        print ('first value on rank ', rank, ': ', self.index[0])
-        print ('last value on rank ', rank, ': ', self.index[-1])
-
-
         self.index_cycle = cycle(self.index)
         self.size = len(self.index)
         self.steps = np.ceil(self.size / batch_size)
@@ -877,7 +927,7 @@ class CombinedDataGenerator(object):
         df = self.data.df_response.iloc[self.index, :].drop(['Group'], axis=1)
         return df.copy() if copy else df
 
-    def get_slice(self, size=None, contiguous=True, dataframe=False):
+    def get_slice(self, size=None, contiguous=True, single=False, dataframe=False):
         size = size or self.size
 
         index = list(islice(self.index_cycle, size))
@@ -894,13 +944,23 @@ class CombinedDataGenerator(object):
         df.loc[swap, 'Dose2'] = df_orig.loc[swap, 'Dose1']
 
         split = df_orig['Drug2'].isnull()
-        df.loc[split, 'Drug2'] = df_orig.loc[split, 'Drug1']
-        df.loc[split, 'Dose1'] = df_orig.loc[split, 'Dose1'] - np.log10(df.loc[split, 'DoseSplit'])
-        df.loc[split, 'Dose2'] = df_orig.loc[split, 'Dose1'] - np.log10(1 - df.loc[split, 'DoseSplit'])
+        if not single:
+            df.loc[split, 'Drug2'] = df_orig.loc[split, 'Drug1']
+            df.loc[split, 'Dose1'] = df_orig.loc[split, 'Dose1'] - np.log10(df.loc[split, 'DoseSplit'])
+            df.loc[split, 'Dose2'] = df_orig.loc[split, 'Dose1'] - np.log10(1 - df.loc[split, 'DoseSplit'])
 
-        y = values_or_dataframe(df['Growth'], contiguous, dataframe)
+        if dataframe:
+            cols = ['Growth', 'Sample', 'Drug1', 'Drug2'] if not single else ['Growth', 'Sample', 'Drug1']
+            y = df[cols].reset_index(drop=True)
+        else:
+            y = values_or_dataframe(df['Growth'], contiguous, dataframe)
 
         x_list = []
+
+        doses = ['Dose1', 'Dose2'] if not single else ['Dose1']
+        for dose in doses:
+            x = values_or_dataframe(df[[dose]].reset_index(drop=True), contiguous, dataframe)
+            x_list.append(x)
 
         if self.data.encode_response_source:
             df_x = pd.merge(df[['Source']], self.data.df_source, on='Source', how='left')
@@ -915,23 +975,23 @@ class CombinedDataGenerator(object):
             x = values_or_dataframe(df_x, contiguous, dataframe)
             x_list.append(x)
 
-        for drug in ['Drug1', 'Drug2']:
+        drugs = ['Drug1', 'Drug2'] if not single else ['Drug1']
+        for drug in drugs:
             for fea in self.data.drug_features:
                 df_drug = getattr(self.data, self.data.drug_df_dict[fea])
                 df_x = pd.merge(df[[drug]], df_drug, left_on=drug, right_on='Drug', how='left')
                 df_x.drop([drug, 'Drug'], axis=1, inplace=True)
+                if dataframe and not single:
+                    df_x = df_x.add_prefix(drug + '.')
                 x = values_or_dataframe(df_x, contiguous, dataframe)
                 x_list.append(x)
 
-        for dose in ['Dose1', 'Dose2']:
-            x = values_or_dataframe(df[[dose]], contiguous, dataframe)
-            x_list.append(x)
-
+        # print(x_list, y)
         return x_list, y
 
-    def flow(self):
+    def flow(self, single=False):
         while 1:
-            x_list, y = self.get_slice(self.batch_size)
+            x_list, y = self.get_slice(self.batch_size, single=single)
             yield x_list, y
 
 

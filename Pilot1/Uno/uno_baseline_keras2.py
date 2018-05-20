@@ -110,8 +110,6 @@ def extension_from_parameters(args):
         ext += '.L1000'
     if args.no_gen:
         ext += '.ng'
-    if args.use_combo_score:
-        ext += '.scr'
     for i, n in enumerate(args.dense):
         if n > 0:
             ext += '.D{}={}'.format(i+1, n)
@@ -330,13 +328,39 @@ def run(params):
                 ncols=args.feature_subsample,
                 cell_features=args.cell_features,
                 drug_features=args.drug_features,
+                drug_median_response_min=args.drug_median_response_min,
+                drug_median_response_max=args.drug_median_response_max,
+                use_landmark_genes=args.use_landmark_genes,
+                use_filtered_genes=args.use_filtered_genes,
+                preprocess_rnaseq=args.preprocess_rnaseq,
+                single=args.single,
                 train_sources=args.train_sources,
-                # test_sources=args.test_sources,
+                test_sources=args.test_sources,
                 embed_feature_source=not args.no_feature_source,
                 encode_response_source=not args.no_response_source,
                 )
 
-    loader.partition_data(cv_folds=args.cv, by_cell=args.by_cell, by_drug=args.by_drug)
+    val_split = args.validation_split
+    train_split = 1 - val_split
+
+    if args.export_data:
+        fname = args.export_data
+        loader.partition_data(cv_folds=args.cv, train_split=train_split, val_split=val_split,
+                              cell_types=args.cell_types, by_cell=args.by_cell, by_drug=args.by_drug)
+        train_gen = CombinedDataGenerator(loader, batch_size=args.batch_size, shuffle=args.shuffle)
+        val_gen = CombinedDataGenerator(loader, partition='val', batch_size=args.batch_size, shuffle=args.shuffle)
+        x_train_list, y_train = train_gen.get_slice(size=train_gen.size, dataframe=True, single=args.single)
+        x_val_list, y_val = val_gen.get_slice(size=val_gen.size, dataframe=True, single=args.single)
+        df_train = pd.concat([y_train] + x_train_list, axis=1)
+        df_val = pd.concat([y_val] + x_val_list, axis=1)
+        df = pd.concat([df_train, df_val]).reset_index(drop=True)
+        if args.growth_bins > 1:
+            df = uno_data.discretize(df, 'Growth', bins=args.growth_bins)
+        df.to_csv(fname, sep='\t', index=False, float_format="%.3g")
+        return
+
+    loader.partition_data(cv_folds=args.cv, train_split=train_split, val_split=val_split,
+                          cell_types=args.cell_types, by_cell=args.by_cell, by_drug=args.by_drug)
 
     model = build_model(loader, args)
     logger.info('Combined model:')
@@ -433,8 +457,8 @@ def run(params):
                        description='Between random pairs in y_val:')
 
         if args.no_gen:
-            x_train_list, y_train = train_gen.get_slice(size=train_gen.size)
-            x_val_list, y_val = val_gen.get_slice(size=val_gen.size)
+            x_train_list, y_train = train_gen.get_slice(size=train_gen.size, single=args.single)
+            x_val_list, y_val = val_gen.get_slice(size=val_gen.size, single=args.single)
             history = model.fit(x_train_list, y_train,
                                 batch_size=args.batch_size,
                                 epochs=args.epochs,
@@ -443,10 +467,10 @@ def run(params):
         else:
             logger.info('Data points per epoch: train = %d, val = %d',train_gen.size, val_gen.size)
             logger.info('Steps per epoch: train = %d, val = %d',train_gen.steps, val_gen.steps)
-            history = model.fit_generator(train_gen.flow(), train_gen.steps,
+            history = model.fit_generator(train_gen.flow(single=args.single), train_gen.steps,
                                           epochs=args.epochs,
                                           callbacks=callbacks,
-                                          validation_data=val_gen.flow(),
+                                          validation_data=val_gen.flow(single=args.single),
                                           validation_steps=val_gen.steps)
 
         if args.cp:
@@ -457,11 +481,8 @@ def run(params):
             y_val_pred = model.predict(x_val_list, batch_size=args.batch_size)
         else:
             val_gen.reset()
-            y_val_pred = model.predict_generator(val_gen.flow(), val_gen.steps)
+            y_val_pred = model.predict_generator(val_gen.flow(single=args.single), val_gen.steps)
             y_val_pred = y_val_pred[:val_gen.size]
-
-        if K.backend() == 'tensorflow':
-            K.clear_session()
 
         y_val_pred = y_val_pred.flatten()
 
@@ -482,6 +503,26 @@ def run(params):
     if args.cv > 1:
         scores = evaluate_prediction(df_pred['Growth'], df_pred['PredictedGrowth'])
         log_evaluation(scores, description='Combining cross validation folds:')
+
+    for test_source in loader.test_sep_sources:
+        test_gen = CombinedDataGenerator(loader, partition='test', batch_size=args.batch_size, source=test_source)
+        df_test = test_gen.get_response(copy=True)
+        y_test = df_test['Growth'].values
+        n_test = len(y_test)
+        if n_test == 0:
+            continue
+        if args.no_gen:
+            x_test_list, y_test = test_gen.get_slice(size=test_gen.size, single=args.single)
+            y_test_pred = model.predict(x_test_list, batch_size=args.batch_size)
+        else:
+            y_test_pred = model.predict_generator(test_gen.flow(single=args.single), test_gen.steps)
+            y_test_pred = y_test_pred[:test_gen.size]
+        y_test_pred = y_test_pred.flatten()
+        scores = evaluate_prediction(y_test, y_test_pred)
+        log_evaluation(scores, description='Testing on data from {} ({})'.format(test_source, n_test))
+
+    if K.backend() == 'tensorflow':
+        K.clear_session()
 
     logger.handlers = []
 

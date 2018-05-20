@@ -54,6 +54,9 @@ def uno_parser(parser):
                         default=argparse.SUPPRESS,
                         choices=['train', 'all', 'CCLE', 'CTRP', 'gCSI', 'GDSC', 'NCI60', 'SCL', 'SCLC', 'ALMANAC'],
                         help="use one or more sources of drug response data for testing")
+    parser.add_argument("--cell_types", nargs='+',
+                        default=argparse.SUPPRESS,
+                        help="limit training and test data to one or more tissue types")
     parser.add_argument("--cell_features", nargs='+',
                         default=argparse.SUPPRESS,
                         choices=['rnaseq', 'none'],
@@ -62,6 +65,12 @@ def uno_parser(parser):
                         default=argparse.SUPPRESS,
                         choices=['descriptors', 'fingerprints', 'none'],
                         help="use dragon7 descriptors, latent representations from Aspuru-Guzik's SMILES autoencoder, or both, or one-hot encoded drugs, or random features; 'descriptors','latent', 'all', 'categorical', 'noise'")
+    parser.add_argument('--drug_median_response_min', type=float,
+                        default=-1,
+                        help='keep drugs whose median response is greater than the threshold')
+    parser.add_argument('--drug_median_response_max', type=float,
+                        default=1,
+                        help='keep drugs whose median response is less than the threshold')
     parser.add_argument("--no_feature_source", action="store_true",
                         help="do not embed cell or drug feature source as part of input")
     parser.add_argument("--no_response_source", action="store_true",
@@ -71,6 +80,11 @@ def uno_parser(parser):
                         help='number of neurons in intermediate dense layers in the feature encoding submodels')
     parser.add_argument("--use_landmark_genes", action="store_true",
                         help="use the 978 landmark genes from LINCS (L1000) as expression features")
+    parser.add_argument("--use_filtered_genes", action="store_true",
+                        help="use the variance filtered genes as expression features")
+    parser.add_argument("--preprocess_rnaseq",
+                        choices=['source_scale', 'combat', 'none'],
+                        help="preprocessing method for RNAseq data; none for global normalization")
     parser.add_argument("--residual", action="store_true",
                         help="add skip connections to the layers")
     parser.add_argument('--reduce_lr', action='store_true',
@@ -99,6 +113,14 @@ def uno_parser(parser):
     parser.add_argument("--cache",
                         default=None,
                         help="prefix of data cache files to use")
+    parser.add_argument("--single", action="store_true",
+                        help="do not use drug pair representation")
+    parser.add_argument("--export_data",
+                        default=None,
+                        help="output dataframe file name")
+    parser.add_argument("--growth_bins", type=int,
+                        default=0,
+                        help="number of bins to use when discretizing growth response")
     return parser
 
 
