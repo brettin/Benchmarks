@@ -183,6 +183,8 @@ def get_p1_common_parser(parser):
     parser.add_argument("--val_samples", action="store",
                         default=argparse.SUPPRESS, type=int,
                         help="overrides the number of validation samples if set to nonzero")
+    parser.add_argument("--warmup_lr", action='store_true',
+                        help="use learning rate schedule in first 5 epochs")
 
 
     # Backend configuration
